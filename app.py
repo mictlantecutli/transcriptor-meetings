@@ -3,24 +3,20 @@ import tempfile
 import threading
 import uuid
 
+import requests
 from flask import Flask, render_template, request, send_file, flash, redirect, jsonify
-from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 app.secret_key = "dev-secret-key"  # cámbiala si algún día esto sale de tu máquina
 
-# Modelo: "tiny", "base", "small", "medium", "large-v3"
-# "tiny" funciona bien en hostings gratuitos con poca RAM (ej. Render free tier).
-# En tu Mac, mientras desarrollas, puedes subir a "base" o "small" si quieres
-# más precisión (edita esta línea o usa la variable de entorno MODEL_SIZE).
-MODEL_SIZE = os.environ.get("MODEL_SIZE", "tiny")
-model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+# whisper-large-v3-turbo: rápido y barato, buena precisión para reuniones.
+GROQ_MODEL = "whisper-large-v3-turbo"
 
 ALLOWED_EXTENSIONS = {"mp3", "wav", "m4a", "ogg", "flac", "webm", "mp4"}
 
 # Guarda el estado de cada transcripción en memoria: {job_id: {...}}
-# Suficiente para un solo usuario/instancia. Si algún día corres varias
-# instancias del servidor a la vez, esto habría que moverlo a algo como Redis.
 jobs = {}
 
 
@@ -28,11 +24,25 @@ def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def run_transcription(job_id: str, tmp_path: str):
+def run_transcription(job_id: str, tmp_path: str, original_filename: str):
     try:
-        segments, info = model.transcribe(tmp_path, beam_size=5)
-        text = " ".join(segment.text.strip() for segment in segments)
-        jobs[job_id] = {"status": "done", "text": text}
+        with open(tmp_path, "rb") as f:
+            response = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": (original_filename, f)},
+                data={"model": GROQ_MODEL, "response_format": "text"},
+                timeout=600,
+            )
+
+        if response.status_code != 200:
+            jobs[job_id] = {
+                "status": "error",
+                "error": f"Groq respondió {response.status_code}: {response.text[:300]}",
+            }
+            return
+
+        jobs[job_id] = {"status": "done", "text": response.text}
     except Exception as e:
         jobs[job_id] = {"status": "error", "error": str(e)}
     finally:
@@ -46,6 +56,10 @@ def index():
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
+    if not GROQ_API_KEY:
+        flash("Falta configurar GROQ_API_KEY en las variables de entorno.")
+        return redirect("/")
+
     if "audio" not in request.files:
         flash("No se subió ningún archivo.")
         return redirect("/")
@@ -64,7 +78,9 @@ def transcribe():
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "processing"}
 
-    thread = threading.Thread(target=run_transcription, args=(job_id, tmp_path))
+    thread = threading.Thread(
+        target=run_transcription, args=(job_id, tmp_path, file.filename)
+    )
     thread.daemon = True
     thread.start()
 
