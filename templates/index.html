@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Transcriptor de Audio</title>
+  <style>
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      max-width: 700px;
+      margin: 60px auto;
+      padding: 0 20px;
+      color: #222;
+    }
+    h1 { font-size: 1.4rem; }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 24px;
+      margin-top: 20px;
+    }
+    input[type="file"] { margin: 12px 0; }
+    button {
+      background: #111;
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    button:hover { background: #333; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .flash, .error { color: #b00020; margin-top: 10px; }
+    .status { color: #555; margin-top: 14px; }
+    textarea {
+      width: 100%;
+      height: 260px;
+      margin-top: 14px;
+      padding: 10px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    .filename { color: #666; font-size: 0.85rem; margin-top: 6px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Transcriptor de Audio</h1>
+
+  <div class="card">
+    <form id="upload-form">
+      <label for="audio">Sube un archivo de audio:</label><br />
+      <input type="file" name="audio" id="audio" accept="audio/*,video/mp4" required />
+      <br />
+      <button type="submit" id="submit-btn">Transcribir</button>
+    </form>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for m in messages %}
+          <p class="flash">{{ m }}</p>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <p id="status-msg" class="status hidden"></p>
+  </div>
+
+  <div class="card hidden" id="result-card">
+    <p class="filename" id="result-filename"></p>
+    <form action="/download" method="post">
+      <textarea name="transcript" id="transcript-box" readonly></textarea>
+      <br /><br />
+      <button type="submit">Descargar como .txt</button>
+    </form>
+  </div>
+
+  <script>
+    const form = document.getElementById("upload-form");
+    const submitBtn = document.getElementById("submit-btn");
+    const statusMsg = document.getElementById("status-msg");
+    const resultCard = document.getElementById("result-card");
+    const transcriptBox = document.getElementById("transcript-box");
+    const filenameEl = document.getElementById("result-filename");
+
+    let pollTimer = null;
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      resultCard.classList.add("hidden");
+      statusMsg.classList.remove("hidden");
+      statusMsg.textContent = "Subiendo audio...";
+      submitBtn.disabled = true;
+
+      const fileInput = document.getElementById("audio");
+      const filename = fileInput.files[0] ? fileInput.files[0].name : "";
+      const formData = new FormData(form);
+
+      try {
+        const res = await fetch("/transcribe", { method: "POST", body: formData });
+        if (!res.ok) {
+          statusMsg.textContent = "Hubo un error al subir el archivo.";
+          submitBtn.disabled = false;
+          return;
+        }
+        const data = await res.json();
+        statusMsg.textContent = "Transcribiendo... esto puede tardar varios minutos para audios largos.";
+        pollStatus(data.job_id, filename);
+      } catch (err) {
+        statusMsg.textContent = "Error de conexión al subir el archivo.";
+        submitBtn.disabled = false;
+      }
+    });
+
+    function pollStatus(jobId, filename) {
+      pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`/status/${jobId}`);
+          const data = await res.json();
+
+          if (data.status === "done") {
+            clearInterval(pollTimer);
+            statusMsg.classList.add("hidden");
+            submitBtn.disabled = false;
+            transcriptBox.value = data.text;
+            filenameEl.textContent = "Archivo: " + filename;
+            resultCard.classList.remove("hidden");
+          } else if (data.status === "error") {
+            clearInterval(pollTimer);
+            statusMsg.textContent = "Error al transcribir: " + data.error;
+            submitBtn.disabled = false;
+          }
+          // si sigue "processing", no hacemos nada y esperamos el siguiente intento
+        } catch (err) {
+          // fallo de red momentáneo (ej. el servidor despertando); seguimos intentando
+        }
+      }, 5000);
+    }
+  </script>
+</body>
+</html>
